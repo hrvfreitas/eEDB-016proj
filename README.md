@@ -1,6 +1,6 @@
 # RadarPNCP — Mapeamento de Redes de Contratação Pública em Grafo
 
-## Hercules Ramos Veloso de Freitas
+
 
 **Curso:** Especialização em Big Data — Escola Politécnica da USP
 **Disciplina:** Repositórios de Dados e NoSQL (eEDB-016)
