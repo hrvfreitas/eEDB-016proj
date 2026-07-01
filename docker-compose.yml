@@ -1,0 +1,27 @@
+services:
+  neo4j:
+    image: neo4j:5
+    container_name: neo4j-radarpncp
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Browser (http://localhost:7474)
+      - "7687:7687"   # Bolt (driver/cypher-shell)
+    environment:
+      NEO4J_AUTH: neo4j/radarpncp123
+      # Tuning conservador — dataset é só 10 registros, não precisa
+      # disputar memória com o resto do notebook (16 GB RAM)
+      NEO4J_dbms_memory_heap_initial__size: 512m
+      NEO4J_dbms_memory_heap_max__size: 512m
+      NEO4J_dbms_memory_pagecache_size: 512m
+    volumes:
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
+      - ./data/neo4j/import:/var/lib/neo4j/import
+      # monta o script direto dentro do container, sem precisar copiar
+      - ./etapa3_poc_radarpncp.cypher:/var/lib/neo4j/import/etapa3_poc_radarpncp.cypher:ro
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p radarpncp123 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s

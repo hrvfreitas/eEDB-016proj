@@ -1,15 +1,11 @@
 # RadarPNCP — Mapeamento de Redes de Contratação Pública em Grafo
 
-## Antonio Daniel de Souza Linhares
 ## Hercules Ramos Veloso de Freitas
-## Yuri Alexandre Barbosa Rodrigues
-
-
 
 **Curso:** Especialização em Big Data — Escola Politécnica da USP
 **Disciplina:** Repositórios de Dados e NoSQL (eEDB-016)
 **Prof. Dr. Pedro Luiz Pizzigatti Corrêa — Prof. Dra. Jeaneth Machicao**
-**Tecnologia NoSQL:** Neo4j (grafos) 
+**Tecnologia NoSQL:** Neo4j (grafos) — única tecnologia utilizada no projeto
 **Domínio:** contratações públicas do PNCP, modeladas como rede de relacionamentos entre órgãos públicos, fornecedores e contratos
 
 ---
