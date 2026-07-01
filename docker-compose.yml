@@ -18,7 +18,7 @@ services:
       - ./data/neo4j/logs:/logs
       - ./data/neo4j/import:/var/lib/neo4j/import
       # monta o script direto dentro do container, sem precisar copiar
-      - ./etapa3_poc_radarpncp.cypher:/var/lib/neo4j/import/etapa3_poc_radarpncp.cypher:ro
+      - ./etapa3_poc_radarpncp.cypher:/var/lib/neo4j/import/etapa3_poc_radarpncp.cypher
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p radarpncp123 'RETURN 1' || exit 1"]
       interval: 10s
