@@ -6,17 +6,7 @@ real de fornecedores PJ via Receita Federal (espelhado pela BrasilAPI).
 Pré-requisitos:
     pip install psycopg2-binary requests neo4j --break-system-packages
 
-Antes de rodar:
-  - Confirme os nomes de coluna das dimensões (orgao_nome, codigo_unidade,
-    nome_unidade, fornecedor_nome, modalidade_nome) contra o seu gold_setup.py —
-    usei os nomes do dicionário de dados do README do Lab01_PART1_5479786,
-    mas se você renomeou algo lá, ajuste o SQL abaixo.
-  - A BrasilAPI é pública e gratuita, sem autenticação, mas tem rate limit
-    informal — por isso o delay entre chamadas e o cache em memória.
-  - Não testei a chamada à BrasilAPI neste ambiente (minha rede aqui é
-    restrita a um allowlist que não inclui brasilapi.com.br) — teste no
-    seu notebook antes de confiar no resultado.
-"""
+
 
 import time
 import psycopg2
@@ -51,13 +41,19 @@ WITH top_fornecedores AS (
     LIMIT %(top_fornecedores)s
 )
 SELECT
-    f.id_contrato_pncp, f.numero_contrato, f.processo, f.objeto_contrato,
+    f.id_contrato_pncp, f.numero_contrato, f.processo,
+    f.categoria_processo,
+    -- TODO objeto: reincluir f.objeto_contrato aqui quando o campo
+    -- for adicionado à fato_contratos (hoje não existe na Gold)
     f.valor_inicial, f.valor_global, f.valor_parcelas,
     f.data_assinatura, f.data_vigencia_inicio, f.data_vigencia_fim, f.data_publicacao,
-    o.orgao_entidade_id  AS orgao_cnpj,   o.orgao_entidade_nome AS orgao_nome,
-    o.codigo_unidade,    o.nome_unidade,
-    fo.cnpj_contratada   AS fornecedor_ni, fo.nome_contratada   AS fornecedor_nome,
-    m.id_modalidade,     m.modalidade_nome
+    o.orgao_entidade_id           AS orgao_cnpj,
+    o.nome_orgao                  AS orgao_nome,
+    o.codigo_unidade, o.nome_unidade,
+    TRIM(fo.cnpj_contratada)      AS fornecedor_ni,
+    COALESCE(fo.nome_razao_social, fo.nome_contratada) AS fornecedor_nome,
+    m.id_modalidade,
+    m.nome_modalidade             AS modalidade_nome
 FROM fato_contratos f
 JOIN top_fornecedores  tf ON tf.cnpj_contratada  = f.cnpj_contratada
 JOIN dim_orgaos        o  ON o.orgao_entidade_id = f.orgao_entidade_id
@@ -122,13 +118,15 @@ MERGE (m:Modalidade {id_modalidade: $id_modalidade})
 
 MERGE (c:Contrato {id_contrato_pncp: $id_contrato_pncp})
   ON CREATE SET c.numero_contrato = $numero_contrato, c.processo = $processo,
-                c.objeto_contrato = $objeto_contrato,
+                c.categoria_processo = $categoria_processo,
+                // TODO objeto: reincluir c.objeto_contrato = $objeto_contrato
+                // quando o campo voltar à fato_contratos
                 c.valor_inicial = $valor_inicial, c.valor_global = $valor_global,
                 c.valor_parcelas = $valor_parcelas,
-                c.data_assinatura = date($data_assinatura),
-                c.data_vigencia_inicio = date($data_vigencia_inicio),
-                c.data_vigencia_fim = date($data_vigencia_fim),
-                c.data_publicacao = date($data_publicacao)
+                c.data_assinatura = CASE WHEN $data_assinatura IS NULL THEN null ELSE date($data_assinatura) END,
+                c.data_vigencia_inicio = CASE WHEN $data_vigencia_inicio IS NULL THEN null ELSE date($data_vigencia_inicio) END,
+                c.data_vigencia_fim = CASE WHEN $data_vigencia_fim IS NULL THEN null ELSE date($data_vigencia_fim) END,
+                c.data_publicacao = CASE WHEN $data_publicacao IS NULL THEN null ELSE date($data_publicacao) END
 
 MERGE (o)-[:CONTRATOU]->(c)
 MERGE (f)-[:FORNECEU]->(c)
@@ -143,6 +141,11 @@ MERGE (f1)-[:MESMO_ENDERECO]->(f2)
 RETURN count(*) AS arestas_criadas
 """
 
+def _data_ou_none(valor):
+    """Converte date do Postgres em 'YYYY-MM-DD' ou preserva None
+    (evita que str(None) vire a string 'None' e quebre o date() do Cypher)."""
+    return valor.isoformat() if valor is not None else None
+
 def carregar_no_neo4j(registros):
     driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
     with driver.session() as session:
@@ -155,16 +158,19 @@ def carregar_no_neo4j(registros):
                 "endereco": endereco,
                 "id_modalidade": r["id_modalidade"], "modalidade_nome": r["modalidade_nome"],
                 "id_contrato_pncp": r["id_contrato_pncp"], "numero_contrato": r["numero_contrato"],
-                "processo": r["processo"], "objeto_contrato": r["objeto_contrato"],
+                "processo": r["processo"],
+                "categoria_processo": r["categoria_processo"],
                 "valor_inicial": float(r["valor_inicial"] or 0),
                 "valor_global": float(r["valor_global"] or 0),
                 "valor_parcelas": float(r["valor_parcelas"] or 0),
-                "data_assinatura": str(r["data_assinatura"]),
-                "data_vigencia_inicio": str(r["data_vigencia_inicio"]),
-                "data_vigencia_fim": str(r["data_vigencia_fim"]),
-                "data_publicacao": str(r["data_publicacao"]),
+                "data_assinatura": _data_ou_none(r["data_assinatura"]),
+                "data_vigencia_inicio": _data_ou_none(r["data_vigencia_inicio"]),
+                "data_vigencia_fim": _data_ou_none(r["data_vigencia_fim"]),
+                "data_publicacao": _data_ou_none(r["data_publicacao"]),
             })
-            print(f"  + {r['fornecedor_nome'][:40]:40s} -> {r['orgao_nome'][:30]:30s} | endereco: {endereco or '—'}")
+            nome = (r["fornecedor_nome"] or "?")[:40]
+            orgao = (r["orgao_nome"] or "?")[:30]
+            print(f"  + {nome:40s} -> {orgao:30s} | endereco: {endereco or '—'}")
 
         print("Conectando fornecedores com o mesmo endereço (MESMO_ENDERECO)...")
         result = session.run(CYPHER_MESMO_ENDERECO).single()
