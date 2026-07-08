@@ -1,13 +1,3 @@
-"""
-ingest_postgres_to_neo4j.py
-RadarPNCP — versão híbrida: contratos reais (Postgres Gold) + endereço
-real de fornecedores PJ via Receita Federal (espelhado pela BrasilAPI).
-
-Pré-requisitos:
-    pip install psycopg2-binary requests neo4j --break-system-packages
-
-
-
 import time
 import psycopg2
 import psycopg2.extras
@@ -24,12 +14,6 @@ TOP_FORNECEDORES_MULTIORGAO = 80  # quantos fornecedores "interessantes" (>1 ór
 BRASILAPI_DELAY_S = 1.3     # segundos entre chamadas — respeita o rate limit público
 
 # ---------------- 1. Extração do Postgres (Gold real) ----------------
-# Em vez de simplesmente pegar os 200 contratos de maior valor (o que poderia
-# devolver 200 fornecedores distintos com 1 contrato cada, deixando Q3 vazia),
-# primeiro seleciona os fornecedores que JÁ são multiórgão nos dados reais,
-# e só então pega os contratos deles. Isso garante que a amostra alimenta
-# Q3 (multiórgão) de verdade, e dá à BrasilAPI uma população onde vínculos
-# de mesmo endereço (Q4/Q5) são mais prováveis de aparecer organicamente.
 SQL_BASE = """
 WITH top_fornecedores AS (
     SELECT cnpj_contratada,
@@ -78,16 +62,21 @@ def buscar_endereco_receita(cnpj_ou_cpf: str):
     Fornecedor pessoa física (CPF) não tem esse registro público — retorna None,
     e o nó fica sem endereco (não participa de MESMO_ENDERECO)."""
     doc = "".join(ch for ch in (cnpj_ou_cpf or "") if ch.isdigit())
+    
     if len(doc) != 14:
         return None
+        
     if doc in _cache_endereco:
         return _cache_endereco[doc]
+        
     try:
         resp = requests.get(f"https://brasilapi.com.br/api/cnpj/v1/{doc}", timeout=10)
         time.sleep(BRASILAPI_DELAY_S)
+        
         if resp.status_code != 200:
             _cache_endereco[doc] = None
             return None
+            
         d = resp.json()
         partes = [
             d.get("descricao_tipo_de_logradouro", "") or "",
@@ -95,8 +84,14 @@ def buscar_endereco_receita(cnpj_ou_cpf: str):
         ]
         rua = " ".join(p for p in partes if p).strip()
         endereco = f"{rua}, {d.get('numero','')} - {d.get('bairro','')}, {d.get('municipio','')}/{d.get('uf','')}"
+        
+        # Limpeza caso a API devolva vazios e resulte em ", - , /"
+        if len(endereco) < 10:
+            endereco = None
+            
         _cache_endereco[doc] = endereco
         return endereco
+        
     except requests.RequestException as e:
         print(f"  [aviso] falha ao consultar CNPJ {doc}: {e}")
         _cache_endereco[doc] = None
@@ -109,8 +104,7 @@ MERGE (o:OrgaoPublico {cnpj: $orgao_cnpj})
 
 MERGE (f:Fornecedor {ni_fornecedor: $fornecedor_ni})
   ON CREATE SET f.nome = $fornecedor_nome,
-                f.tipo_pessoa = CASE WHEN size(replace(replace($fornecedor_ni,'.',''),'-','')) = 14
-                                     THEN 'PJ' ELSE 'PF' END,
+                f.tipo_pessoa = $tipo_pessoa,
                 f.endereco = $endereco
 
 MERGE (m:Modalidade {id_modalidade: $id_modalidade})
@@ -134,9 +128,13 @@ MERGE (c)-[:DE_MODALIDADE]->(m)
 """
 
 CYPHER_MESMO_ENDERECO = """
-MATCH (f1:Fornecedor), (f2:Fornecedor)
-WHERE f1.ni_fornecedor < f2.ni_fornecedor
-  AND f1.endereco IS NOT NULL AND f1.endereco = f2.endereco
+MATCH (f:Fornecedor)
+WHERE f.endereco IS NOT NULL
+WITH f.endereco AS ender, collect(f) AS fornecedores
+WHERE size(fornecedores) > 1
+UNWIND fornecedores AS f1
+UNWIND fornecedores AS f2
+WITH f1, f2 WHERE id(f1) < id(f2) // Use elementId(f1) < elementId(f2) se estiver no Neo4j 5+
 MERGE (f1)-[:MESMO_ENDERECO]->(f2)
 RETURN count(*) AS arestas_criadas
 """
@@ -150,11 +148,17 @@ def carregar_no_neo4j(registros):
     driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
     with driver.session() as session:
         for r in registros:
-            endereco = buscar_endereco_receita(r["fornecedor_ni"])
+            ni_str = r["fornecedor_ni"] or ""
+            doc_apenas_numeros = "".join(filter(str.isdigit, ni_str))
+            tipo_pessoa = "PJ" if len(doc_apenas_numeros) == 14 else "PF"
+            
+            endereco = buscar_endereco_receita(ni_str)
+            
             session.run(CYPHER_UPSERT, {
                 "orgao_cnpj": r["orgao_cnpj"], "orgao_nome": r["orgao_nome"],
                 "codigo_unidade": r["codigo_unidade"], "nome_unidade": r["nome_unidade"],
-                "fornecedor_ni": r["fornecedor_ni"], "fornecedor_nome": r["fornecedor_nome"],
+                "fornecedor_ni": ni_str, "fornecedor_nome": r["fornecedor_nome"],
+                "tipo_pessoa": tipo_pessoa,
                 "endereco": endereco,
                 "id_modalidade": r["id_modalidade"], "modalidade_nome": r["modalidade_nome"],
                 "id_contrato_pncp": r["id_contrato_pncp"], "numero_contrato": r["numero_contrato"],
@@ -168,6 +172,7 @@ def carregar_no_neo4j(registros):
                 "data_vigencia_fim": _data_ou_none(r["data_vigencia_fim"]),
                 "data_publicacao": _data_ou_none(r["data_publicacao"]),
             })
+            
             nome = (r["fornecedor_nome"] or "?")[:40]
             orgao = (r["orgao_nome"] or "?")[:30]
             print(f"  + {nome:40s} -> {orgao:30s} | endereco: {endereco or '—'}")
@@ -175,6 +180,7 @@ def carregar_no_neo4j(registros):
         print("Conectando fornecedores com o mesmo endereço (MESMO_ENDERECO)...")
         result = session.run(CYPHER_MESMO_ENDERECO).single()
         print(f"  arestas MESMO_ENDERECO criadas: {result['arestas_criadas']}")
+        
     driver.close()
 
 # ---------------- main ----------------
