@@ -6,6 +6,17 @@
 // Como executar:
 //   cypher-shell -u neo4j -p <senha> -f etapa3_poc_radarpncp.cypher
 // ou colar cada bloco no Neo4j Browser.
+//
+// Revisão 2026-07: correções aplicadas —
+//   Q4: deduplicação de pares espelhados (A,B)/(B,A)
+//   Q6: inclui contratos assinados no MESMO dia; datas via date();
+//       valores via coalesce(); comentário do cabeçalho atualizado
+//   Q7: duration.inDays no lugar de duration.between (que normaliza
+//       em meses+dias e faria "1 mês e 5 dias" passar no filtro de
+//       30 dias); adicionado filtro de valor sob o limiar de
+//       dispensa — é o que diferencia Q7 (fracionamento) de Q6
+//       (recorrência)
+//   Geral: '#' não é comentário em Cypher → '//'
 // ============================================================
 
 // ------------------------------------------------------------
@@ -62,7 +73,9 @@ CREATE (f2)-[:MESMO_ENDERECO]->(f4);
 // ------------------------------------------------------------
 // 6. Nós Contrato (10) + relacionamentos CONTRATOU / FORNECEU / DE_MODALIDADE
 // C1/C2: mesmo fornecedor (F1) e mesmo órgão (O1), objeto quase
-//        idêntico, 13 dias de intervalo → padrão de fracionamento (Q7)
+//        idêntico, 13 dias de intervalo, valores sob o limiar
+//        de dispensa → padrão de fracionamento (Q6 acha a
+//        recorrência; Q7 confirma com o filtro de valor)
 // C5:    F2 (mesmo endereço de F1) também contrata com O1 na
 //        mesma janela → reforça o sinal de risco (Q4)
 // F1 contrata com O1, O2 e O3 → fornecedor multiórgão (Q3)
@@ -162,8 +175,12 @@ ORDER BY qtd_orgaos DESC;
 // conectados que também contrataram com o mesmo órgão
 // (travessia de 1 salto em MESMO_ENDERECO + filtro de órgão
 // em comum)
+// Rev.: dedup de pares espelhados — o match não-direcionado
+// casa cada aresta nos dois sentidos, gerando (A,B) e (B,A);
+// a ordenação por chave garante uma linha por par.
 // ------------------------------------------------------------
 MATCH (f1:Fornecedor)-[:MESMO_ENDERECO]-(f2:Fornecedor)
+WHERE f1.ni_fornecedor < f2.ni_fornecedor
 MATCH (f1)-[:FORNECEU]->(:Contrato)<-[:CONTRATOU]-(o:OrgaoPublico)-[:CONTRATOU]->(:Contrato)<-[:FORNECEU]-(f2)
 RETURN DISTINCT f1.nome AS fornecedor_a, f2.nome AS fornecedor_b, f1.endereco AS endereco, o.nome AS orgao_em_comum;
 
@@ -176,25 +193,80 @@ MATCH p = shortestPath(
 )
 RETURN [n IN nodes(p) | n.nome] AS cadeia_de_vinculos, length(p) AS saltos;
 
-// ------------------------------------------------------------
-// Q6 — Top fornecedores por modalidade (filtro: nome da
-// modalidade; ordenação: valor total desc)
-// ------------------------------------------------------------
-MATCH (f:Fornecedor)-[:FORNECEU]->(c:Contrato)-[:DE_MODALIDADE]->(m:Modalidade {nome:'Pregão Eletrônico'})
-RETURN f.nome AS fornecedor, sum(c.valor_global) AS valor_total
-ORDER BY valor_total DESC;
+// Q5 (visual) — o mesmo caminho, desenhado
+MATCH p = shortestPath(
+  (f1:Fornecedor {ni_fornecedor:'12.345.678/0001-00'})-[:MESMO_ENDERECO*]-(f2:Fornecedor {ni_fornecedor:'45.678.901/0001-33'})
+)
+RETURN p;
 
 // ------------------------------------------------------------
-// Q7 — Possível fracionamento: mesmo fornecedor + mesmo órgão
-// com múltiplos contratos dentro de uma janela de 30 dias
-// (travessia + filtro temporal; filtro: count > 1)
+// Q6 — Recontratação em janela curta: mesmo órgão + mesmo
+// fornecedor contratando de novo em até 30 dias — repetição
+// sem justificativa aparente (estágio 1 do detector; a Q7
+// refina com o filtro de valor).
+// Rev.: dedup pela chave (não pela data) para incluir
+// contratos assinados no MESMO dia — o caso mais escancarado;
+// date() blinda contra datas armazenadas como string;
+// coalesce() evita soma nula; abs() porque a ordem do par não
+// é mais garantida pela data.
 // ------------------------------------------------------------
-MATCH (f:Fornecedor)-[:FORNECEU]->(c:Contrato)<-[:CONTRATOU]-(o:OrgaoPublico)
-WITH f, o, c
-ORDER BY c.data_assinatura
-WITH f, o, collect(c) AS contratos
-UNWIND range(0, size(contratos)-2) AS i
-WITH f, o, contratos[i] AS c1, contratos[i+1] AS c2
-WHERE duration.between(c1.data_assinatura, c2.data_assinatura).days <= 30
-RETURN f.nome AS fornecedor, o.nome AS orgao, c1.numero_contrato AS contrato_1, c2.numero_contrato AS contrato_2,
-       duration.between(c1.data_assinatura, c2.data_assinatura).days AS dias_entre_contratos;
+MATCH (o:OrgaoPublico)-[:CONTRATOU]->(c1:Contrato)<-[:FORNECEU]-(f:Fornecedor),
+      (o)-[:CONTRATOU]->(c2:Contrato)<-[:FORNECEU]-(f)
+WHERE c1.id_contrato_pncp < c2.id_contrato_pncp
+WITH o, f, c1, c2,
+     abs(duration.inDays(date(c1.data_assinatura),
+                         date(c2.data_assinatura)).days) AS dias
+WHERE dias <= 30
+RETURN o.nome             AS orgao,
+       f.nome             AS fornecedor,
+       c1.numero_contrato AS contrato_1, c1.data_assinatura AS data_1,
+       c2.numero_contrato AS contrato_2, c2.data_assinatura AS data_2,
+       dias               AS dias_entre_contratos,
+       coalesce(c1.valor_global, 0) + coalesce(c2.valor_global, 0) AS valor_somado
+ORDER BY dias ASC, valor_somado DESC;
+
+// Q6 (visual) — o mesmo padrão, desenhado
+MATCH p1 = (o:OrgaoPublico)-[:CONTRATOU]->(c1:Contrato)<-[:FORNECEU]-(f:Fornecedor),
+      p2 = (o)-[:CONTRATOU]->(c2:Contrato)<-[:FORNECEU]-(f)
+WHERE c1.id_contrato_pncp < c2.id_contrato_pncp
+  AND abs(duration.inDays(date(c1.data_assinatura),
+                          date(c2.data_assinatura)).days) <= 30
+RETURN p1, p2;
+
+// ------------------------------------------------------------
+// Q7 — Possível fracionamento: refina a Q6 com o filtro de
+// VALOR — ambos os contratos sob o limiar de dispensa
+// (parâmetro de auditoria; R$ 10.000 nos dados de validação).
+// A soma dos dois ultrapassa o limiar: indício de que uma
+// compra foi dividida para escapar da licitação.
+// Rev.: duration.inDays no lugar de duration.between — between
+// normaliza em meses+dias e ".days" retorna só o componente de
+// dias (ex.: 1 mês e 5 dias → days = 5, passando indevidamente
+// no filtro de 30). inDays retorna o total em dias.
+// ------------------------------------------------------------
+MATCH (o:OrgaoPublico)-[:CONTRATOU]->(c1:Contrato)<-[:FORNECEU]-(f:Fornecedor),
+      (o)-[:CONTRATOU]->(c2:Contrato)<-[:FORNECEU]-(f)
+WHERE c1.id_contrato_pncp < c2.id_contrato_pncp
+  AND coalesce(c1.valor_global, 0) < 10000
+  AND coalesce(c2.valor_global, 0) < 10000
+WITH o, f, c1, c2,
+     abs(duration.inDays(date(c1.data_assinatura),
+                         date(c2.data_assinatura)).days) AS dias
+WHERE dias <= 30
+RETURN f.nome             AS fornecedor,
+       o.nome             AS orgao,
+       c1.numero_contrato AS contrato_1, c1.valor_global AS valor_1,
+       c2.numero_contrato AS contrato_2, c2.valor_global AS valor_2,
+       dias               AS dias_entre_contratos,
+       c1.valor_global + c2.valor_global AS valor_somado_acima_do_limiar
+ORDER BY dias ASC;
+
+// Q7 (visual) — os contratos gêmeos sob o limiar, desenhados
+MATCH p1 = (o:OrgaoPublico)-[:CONTRATOU]->(c1:Contrato)<-[:FORNECEU]-(f:Fornecedor),
+      p2 = (o)-[:CONTRATOU]->(c2:Contrato)<-[:FORNECEU]-(f)
+WHERE c1.id_contrato_pncp < c2.id_contrato_pncp
+  AND coalesce(c1.valor_global, 0) < 10000
+  AND coalesce(c2.valor_global, 0) < 10000
+  AND abs(duration.inDays(date(c1.data_assinatura),
+                          date(c2.data_assinatura)).days) <= 30
+RETURN p1, p2;
