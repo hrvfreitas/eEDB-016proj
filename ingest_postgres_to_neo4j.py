@@ -9,7 +9,7 @@ PG_DSN = dict(host="localhost", port=5432, dbname="pncp_db", user="postgres", pa
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_AUTH = ("neo4j", "radarpncp123")
 
-LIMITE_CONTRATOS = 200      # cap final de contratos — ainda é uma PoC, não o pipeline de 3,65M
+LIMITE_CONTRATOS = 200      # cap final de contratos — ainda é uma PoC, não o pipeline de 4.1M
 TOP_FORNECEDORES_MULTIORGAO = 80  # quantos fornecedores "interessantes" (>1 órgão) considerar antes do LIMIT
 BRASILAPI_DELAY_S = 1.3     # segundos entre chamadas — respeita o rate limit público
 
