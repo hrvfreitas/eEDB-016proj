@@ -23,6 +23,8 @@
 7. [Instruções de Execução](#7-instruções-de-execução)
 8. [Logs de Execução das Consultas](#8-logs-de-execução-das-consultas)
 9. [Observações Técnicas](#9-observações-técnicas)
+10. [Roadmap de Detectores](#10-roadmap-de-detectores)
+11. [Uso de IA Generativa](#11-uso-de-ia-generativa)
 
 ---
 
@@ -87,8 +89,8 @@ Jornada do auditor desde a busca inicial até a geração do relatório de risco
 | Q3 | Fornecedores multiórgão | conta `COUNT(DISTINCT órgão)` por fornecedor; filtra > N órgãos | Sim — grau de conexão |
 | Q4 | Rede de mesmo endereço | percorre `MESMO_ENDERECO`; filtra órgão em comum entre fornecedores conectados | Sim — particularidade central de grafos |
 | Q5 | Caminho entre dois fornecedores | define fornecedor início/fim; calcula menor caminho na rede de vínculos | Sim — shortest path |
-| Q6 | Top fornecedores por modalidade | filtra nome da modalidade; ordena `SUM(valor_global)` | Não — 1-2 saltos |
-| Q7 | Possível fracionamento | mesmo fornecedor + mesmo órgão; filtra janela curta de `data_assinatura`; filtra `COUNT(contrato) > N` | Sim — travessia + filtro temporal |
+| Q6 | Recontratação em janela curta | mesmo órgão + mesmo fornecedor com novo contrato em até 30 dias; ordena por `dias_entre_contratos` e `valor_somado` | Sim — travessia + filtro temporal (estágio 1 do detector de fracionamento) |
+| Q7 | Possível fracionamento | refina a Q6: ambos os contratos com `valor_global` sob o limiar de dispensa (parâmetro; R$ 10 mil nos dados de validação), cuja soma o ultrapassa | Sim — travessia + filtro temporal + filtro de valor (estágio 2) |
 
 ## 6. Esquema do Grafo
 
@@ -152,8 +154,27 @@ senha:   radarpncp123
 ## 9. Observações Técnicas
 
 **Por que dados reais e simulados misturados?**
-A base combina contratos reais do PNCP — extraídos do pipeline já validado, priorizando fornecedores que comprovadamente atuam com múltiplos órgãos — com um pequeno conjunto de registros simulados, inserido propositalmente para garantir a demonstração das consultas de travessia (Q4, Q5 e Q7). Vínculos como mesmo endereço entre fornecedores são reais no domínio, mas pouco prováveis de surgir por acaso em uma amostra pequena; sem essa garantia, a apresentação correria o risco de não evidenciar ao vivo exatamente as consultas que justificam a escolha de um banco orientado a grafos.
+A base combina contratos reais do PNCP — extraídos do pipeline já validado, priorizando fornecedores que comprovadamente atuam com múltiplos órgãos — com um pequeno conjunto de registros simulados, inserido propositalmente para garantir a demonstração das consultas de travessia (Q4 a Q7). Vínculos como mesmo endereço entre fornecedores são reais no domínio, mas pouco prováveis de surgir por acaso em uma amostra pequena; sem essa garantia, a apresentação correria o risco de não evidenciar ao vivo exatamente as consultas que justificam a escolha de um banco orientado a grafos.
 
 **Limitação conhecida:** o campo `endereco` não existe no endpoint `/contratos` da API do PNCP. Quando preenchido com dado real, vem de uma fonte externa (BrasilAPI, que espelha o CNPJ público da Receita Federal, ou uma base local dos Dados Abertos do CNPJ) — não do PNCP em si.
 
-**Escala:** este projeto é deliberadamente uma PoC pequena (10 a ~200 registros), não uma réplica do pipeline relacional de 3,65M de contratos do [Lab01_PART1_5479786](https://github.com/hrvfreitas/Lab01_PART1_5479786). O foco aqui é a modelagem orientada a consultas em grafo, não o volume de dados.
+**Escala:** este projeto é deliberadamente uma PoC pequena (10 a ~200 registros), não uma réplica do pipeline relacional de 3,65M de contratos do [Lab01_PART1_5479786](https://github.com/hrvfreitas/Lab01_PART1_5479786). O foco aqui é a modelagem orientada a consultas em grafo, não o volume de dados. Para o corpus completo, a carga exigiria índices adicionais (`data_assinatura`), lotes via `UNWIND`/`apoc.periodic.iterate` e reescrita das comparações par a par (Q4/Q6/Q7) com agrupamento prévio, evitando explosão combinatória.
+
+**Revisão das consultas (jul/2026):** as queries Q4, Q6 e Q7 passaram por revisão de corretude, documentada no cabeçalho de `etapa3_poc_radarpncp.cypher`. Destaques: substituição de `duration.between` (que normaliza em meses+dias e faria "1 mês e 5 dias" passar num filtro de 30 dias) por `duration.inDays`; inclusão de pares de contratos assinados no mesmo dia (o caso mais evidente de fracionamento); e deduplicação de pares espelhados nas travessias não-direcionadas.
+
+## 10. Roadmap de Detectores
+
+O detector de vínculos evolui em gerações, cada uma reduzindo os falsos positivos da anterior:
+
+| Geração | Detector | Fonte | Status |
+| --- | --- | --- | --- |
+| 1 | Mesmo endereço (`MESMO_ENDERECO`) | Receita Federal (BrasilAPI ou dumps locais) | Implementado (Q4/Q5) |
+| 2 | Recontratação + fracionamento temporal/valor | PNCP | Implementado (Q6/Q7) |
+| 3 | Mesmo grupo empresarial (raiz do CNPJ — 8 dígitos) | Derivável do próprio `ni_fornecedor` | Desenhado |
+| 4 | Sócios em comum (`SOCIO_DE` via QSA) e revezamento de vencedores em licitações (bid rotation) | Dados Abertos do CNPJ (QSA) + dados de participantes do PNCP | Concebido |
+
+A geração 4 exigiria modelar a licitação como nó próprio (`(Fornecedor)-[:PARTICIPOU]->(Licitacao)`), permitindo detectar alternância de vencedores entre empresas societariamente vinculadas — o padrão clássico de conluio em contratações públicas.
+
+## 11. Uso de IA Generativa
+
+O desenvolvimento contou com assistência de IA generativa (Claude/Anthropic) para revisão de código e queries, depuração e estruturação do material de apresentação. A modelagem do domínio, as decisões de arquitetura, a estratégia de amostragem e a análise dos resultados são de autoria do grupo.
